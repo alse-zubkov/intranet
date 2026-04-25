@@ -44,6 +44,15 @@ services:
 * Каждый контейнер или группа контейнеров создается в собственном `Stack`, управляется статической `YAML` конфигурацией `Environment` переменными.
 * Основной сетью является `core-intranet-network` (драйвер `bridge`) для взаимодействия между сервисами, она является `external` для любого `Stack`.
 * Сервисы делятся на `core` и `app`, в зависимости от того, является этот сервис внешней зависимостью для другого сервиса (база данных) или базового  функционала (раутинг, мониторинг), или не является таковым и представляет собой конечное приложение (менеджер паролей).
+* Наименование стэков и контейнеров:
+** Если стэк состоит из одного контейнера, то имя стэка совпадает с контейнером (например, `core-postgres`) и указание container_name является обязательным.
+** Если сток состоит из боле чем из одного сервиса, (например, стэк `core-authentik` состоит из сервисов `server` и `worker`), то имя стэка будет являеться префиксом к полному названию контейнера
+* Сервисы не используют стандартные вольюмы, а используют маппинг в датасет `default/data/services/volumes` TrueNAS. В таком случае маунтинг выглядит как 
+[source,yaml]
+----
+volumes:
+  /mnt/default/data/services/volumes/<CONTAINER/STACK-NAME>:...
+----
 
 == Services
 
@@ -51,23 +60,30 @@ services:
 
 Используется как основное хранилище всех данных, в случае, если оно подходит для конкретного сервиса.
 
+.Stack: core-postgres
 [source,yaml]
 ----
 services:
   postgres:
-    container_name: "postgres"
+    container_name: "core-postgres"
     image: postgres:18.3
     restart: always
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - /mnt/default/data/services/volumes/postgres:/var/lib/postgresql
+      - /mnt/default/data/services/volumes/core-postgres:/var/lib/postgresql
     networks:
       - core-intranet-network
 
 networks:
   core-intranet-network:
     external: true
+----
+
+.Environment variables
+[source,yaml]
+----
+POSTGRES_PASSWORD: пароль пользователя postgres
 ----
 
 .Сниптет создания базы данных и пользователя
