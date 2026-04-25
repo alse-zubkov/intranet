@@ -1,0 +1,80 @@
+= Zubkov Intranet
+:toc:
+
+Инфраструктура сети и сервисов Zubkov Intranet.
+
+
+== TrueNAS
+
+=== WebUI
+По умолчанию веб-интерфейс TrueNAS доступен через порты `80` и `443`, однако поскольку эти порты необходимы для интерфейсов веб-сервисов, необходимо установить новые
+
+----
+Система -> Общие настройки -> GUI
+  HTTP-порт веб-интерфейса: 8080
+  HTTPS-порт веб-интерфейса: 8443
+----
+
+=== Datasets
+
+`default/data/services/portainer`:: Основной датасет для самого Portainer'a
+`default/data/services/volumes`:: Датасет для биндинга вольюмов сервисов, разворачиваемых в Portainer
+
+=== Portainer Setup
+TrueNAS предоставляет docker возможности, однако WebUI не используется для настройки всех приложений, поднимаемых в контейнере -- вместо этого поднимается `Portainer` как приложение и уже он управляет остальными контейнерами.
+
+.Portainer CE Yaml configuration
+[source,yaml]
+----
+services:
+  portainer:
+    container_name: core-portainer
+    image: portainer/portainer-ce:latest
+    ports:
+      - '8000:8000'
+      - '9443:9443'
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/default/data/services/portainer:/data
+----
+
+Основные концепции при работе в Portainer:
+
+* Каждый контейнер или группа контейнеров создается в собственном `Stack`, управляется статической `YAML` конфигурацией `Environment` переменными.
+* Основной сетью является `core-intranet-network` (драйвер `bridge`) для взаимодействия между сервисами, она является `external` для любого `Stack`.
+* Сервисы делятся на `core` и `app`, в зависимости от того, является этот сервис внешней зависимостью для другого сервиса (база данных) или базового  функционала (раутинг, мониторинг), или не является таковым и представляет собой конечное приложение (менеджер паролей).
+
+== Services
+
+=== Core Postgres Database
+
+Используется как основное хранилище всех данных, в случае, если оно подходит для конкретного сервиса.
+
+[source,yaml]
+----
+services:
+  postgres:
+    container_name: "postgres"
+    image: postgres:18.3
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - /mnt/default/data/services/volumes/postgres:/var/lib/postgresql
+    networks:
+      - core-intranet-network
+
+networks:
+  core-intranet-network:
+    external: true
+----
+
+.Сниптет создания базы данных и пользователя
+[source,sql]
+----
+# psql -U postgres
+CREATE ROLE service_account WITH LOGIN PASSWORD 'password';
+CREATE DATABASE service_db;
+ALTER DATABASE service_db OWNER TO service_account;
+----
