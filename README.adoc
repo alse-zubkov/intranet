@@ -4,62 +4,203 @@
 Инфраструктура сети и сервисов Zubkov Intranet.
 
 
+== TLS Certificates
+
+В системе используются собственный корневой сертификат RootCA, с помощью котого подписываются все остальные сертификаты, используемые в системе.
+
+Ссылки:
+
+* https://stackoverflow.com/questions/72207572/how-to-create-a-self-signed-code-signing-certificate-from-a-csr
+* https://gist.github.com/fntlnz/cf14feb5a46b2eda428e000157447309
+* https://victoryeo-62924.medium.com/generate-ca-signed-ssl-certificate-with-own-ca-306313fd3469
+
+[source,bash]
+----
+#=====================================================
+# Шаг 1. Создаем RootCA
+
+# Создаем приватный ключ с паролем
+openssl genrsa -des3 -out rootCA.key 4096
+
+# Создать конфигурацию для корневого сертификата rootCA.conf
+[ req ]
+default_bits = 4096
+distinguished_name = req_distinguished_name
+prompt = no
+string_mask = utf8only
+x509_extensions = v3_ca
+[ req_distinguished_name ]
+countryName = RU
+stateOrProvinceName = Moscow
+localityName = Moscow
+organizationName = Zubkov Intranet
+commonName = Zubkov Intranet Root CA
+[ v3_ca ]
+basicConstraints = critical, CA:TRUE, pathlen:0
+keyUsage = critical, digitalSignature, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always, issuer:always
+
+# Создаем корневой сертификат с временем жизни 10 лет
+openssl req -x509 -new -nodes -key rootCA.key -config rootCA.conf -sha256 -days 3650 -out rootCA.crt
+
+#=====================================================
+# Шаг 2. Создаем приватный ключ и запрос на подпись
+
+# Создать приватный ключ
+openssl genrsa -out intranet.zubkov.one.key 2048
+
+# Создать запрос на подпись
+openssl req -new -key intranet.zubkov.one.key -out intranet.zubkov.one.csr
+# Country Name (2 letter code) [AU]:RU
+# State or Province Name (full name) [Some-State]:Moscow
+# Locality Name (eg, city) []:
+# Organization Name (eg, company) [Internet Widgits Pty Ltd]:Zubkov Intranet
+# Organizational Unit Name (eg, section) []:IT
+# Common Name (e.g. server FQDN or YOUR name) []:*.intranet.zubkov.one
+# Email Address []:alse@zubkov.one
+
+# Создать san.conf с помощью которого можно выпустить универсальный сертификат с wildcard
+[ req ]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
+[ req_distinguished_name ]
+CN = *.intranet.zubkov.one
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+subjectAltName = @alt_names
+[ alt_names ]
+DNS.1 = *.intranet.zubkov.one
+DNS.2 = intranet.zubkov.one
+
+#=====================================================
+# Подписать запрос на выпуск сертификата
+openssl x509 -req -in intranet.zubkov.one.csr -CA rootCA.crt -CAkey rootCA.key -CAcreateserial -out intranet.zubkov.one.crt -days 365 -sha256 -extensions v3_req -extfile san.conf
+
+----
+
 == TrueNAS
 
 === WebUI
+Необходимо добавить новый сертификат в TrueNAS для WebUI
+
+----
+Реквизиты -> Сертификаты -> Импорт
+Имя:           general-intranet-zubkov-one
+Сертификат:    cat intranet.zubkov.one.crt
+закрытый ключ: cat intranet.zubkov.one.key
+----
+
 По умолчанию веб-интерфейс TrueNAS доступен через порты `80` и `443`, однако поскольку эти порты необходимы для интерфейсов веб-сервисов, необходимо установить новые
 
 ----
 Система -> Общие настройки -> GUI
-  HTTP-порт веб-интерфейса: 8080
-  HTTPS-порт веб-интерфейса: 8443
+  SSL-сертификат веб-интерфейса: general-intranet-zubkov-one
+  HTTP-порт веб-интерфейса:      8080
+  HTTPS-порт веб-интерфейса:     8443
 ----
+
+После перезапуска необходимо будет подключаться по `https://truenas.intranet.zubkov.one:8443/` (см раутинг)
 
 === Datasets
 
-`default/data/services/portainer`:: Основной датасет для самого Portainer'a
-`default/data/services/volumes`:: Датасет для биндинга вольюмов сервисов, разворачиваемых в Portainer
+`default/data/services/`:: Датасет для биндингов mount-point сервисов, разворачиваемых в Portainer, включается работа по NFS.
 
-=== Portainer Setup
+== Portainer Setup
 TrueNAS предоставляет docker возможности, однако WebUI не используется для настройки всех приложений, поднимаемых в контейнере -- вместо этого поднимается `Portainer` как приложение и уже он управляет остальными контейнерами.
 
-.Portainer CE Yaml configuration
-[source,yaml]
+Режим работы докера - Docker Swarm для обеспечения масштабирования и надежности. Установка производится через CLI интерфейс сервера (https://docs.portainer.io/start/install-ce/server/swarm/linux[официальная документация]):
+
+.File `portainer-agent-stack.yml`
+[source,bash]
 ----
+version: '3.2'
+
 services:
-  portainer:
-    container_name: core-portainer
-    image: portainer/portainer-ce:latest
-    ports:
-      - '8000:8000'
-      - '9443:9443'
-    restart: always
+  agent:
+    image: portainer/agent:lts
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /mnt/default/data/services/portainer:/data
+      # default is /var/lib/docker/volumes:/var/lib/docker/volumes
+      - /mnt/.ix-apps/docker/volumes:/var/lib/docker/volumes
+    networks:
+      - agent_network
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.platform.os == linux]
+
+  portainer:
+    image: portainer/portainer-ce:lts
+    command: -H tcp://tasks.agent:9001 --tlsskipverify
+    ports:
+      - "9443:9443"
+      - "9000:9000"
+      - "8000:8000"
+    volumes:
+      - portainer_data:/data
+    networks:
+      - agent_network
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+
+networks:
+  agent_network:
+    driver: overlay
+    attachable: true
+
+volumes:
+  portainer_data:
 ----
+
+Запустить создание swarm кластера и развернуть portainer ce
+[source,bash]
+----
+sudo docker swarm init
+docker stack deploy -c portainer-agent-stack.yml portainer
+----
+
+И проверить, что появился `portainer/portainer-ce` и `portainer/portainer-agent`
+[source,bash]
+----
+sudo docker ps -a
+----
+
+После чего подключиться к порту `:9443`, создать пользователя, проверить, что все работает
+
+Создать нетворк `core-intranet-network` с драйвером overlay:
+* Subnet `172.22.0.0/16`
+
 
 Основные концепции при работе в Portainer:
 
 * Каждый контейнер или группа контейнеров создается в собственном `Stack`, управляется статической `YAML` конфигурацией `Environment` переменными.
-* Основной сетью является `core-intranet-network` (драйвер `bridge`) для взаимодействия между сервисами, она является `external` для любого `Stack`.
+* Основной сетью является `core-intranet-network` для взаимодействия между сервисами, она является `external` для любого `Stack`.
 * Сервисы делятся на `core` и `app`, в зависимости от того, является этот сервис внешней зависимостью для другого сервиса (база данных) или базового  функционала (раутинг, мониторинг), или не является таковым и представляет собой конечное приложение (менеджер паролей).
 * Наименование стэков и контейнеров:
 ** Если стэк состоит из одного контейнера, то имя стэка совпадает с контейнером (например, `core-postgres`) и указание container_name является обязательным.
 ** Если сток состоит из боле чем из одного сервиса, (например, стэк `core-authentik` состоит из сервисов `server` и `worker`), то имя стэка будет являеться префиксом к полному названию контейнера
 * Сервисы не используют стандартные вольюмы, а используют маппинг в датасет `default/data/services/volumes` TrueNAS. В таком случае маунтинг выглядит как `/mnt/default/data/services/volumes/<CONTAINER_NAME/STACK_NAME>:...`
 
-== Services
+== Core Services
 
-=== Core Postgres Database
+=== Postgres Database
 
 Используется как основное хранилище всех данных, в случае, если оно подходит для конкретного сервиса.
 
-.Stack: core-postgres
+.Stack `core-postgres`
 [source,yaml]
 ----
 services:
-  postgres:
+  core-postgres:
     container_name: "core-postgres"
     image: postgres:18.3
     restart: always
@@ -88,4 +229,50 @@ POSTGRES_PASSWORD: пароль пользователя postgres
 CREATE ROLE service_account WITH LOGIN PASSWORD 'password';
 CREATE DATABASE service_db;
 ALTER DATABASE service_db OWNER TO service_account;
+----
+
+=== Traefik
+
+Используется для раутинга запросов в сервисы с автодискавери.
+
+.Stack `core-traefik`
+[source,yaml]
+----
+services:
+  core-traefik:
+    image: "traefik:v3.4"
+    container_name: "core-traefik"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - intranet
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=core-intranet-network"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.intranet.zubkov.one`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.entrypoints=websecure"
+      - "traefik.http.routers.dashboard.tls=true"
+      - "traefik.http.routers.dashboard.middlewares=auth-administrator"
+      - "traefik.http.middlewares.auth-administrator.basicauth.users=administrator:$$apr1$$lou79e2k$$o90jbOi7OWbKqlue/cguG/"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+
+
+networks:
+  core-intranet-network:
+    external: true
 ----
