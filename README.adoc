@@ -196,30 +196,43 @@ sudo docker ps -a
 
 Используется как основное хранилище всех данных, в случае, если оно подходит для конкретного сервиса.
 
+Подготовка:
+* Создать секрет: `core-postgres-password`
+
 .Stack `core-postgres`
 [source,yaml]
 ----
 services:
-  core-postgres:
-    container_name: "core-postgres"
+  database:
     image: postgres:18.3
     restart: always
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD_FILE: /run/secrets/core-postgres-password
     volumes:
-      - /mnt/default/data/services/volumes/core-postgres:/var/lib/postgresql
+      - /mnt/default/data/services/core-postgres-data:/var/lib/postgresql
     networks:
       - core-intranet-network
+    secrets:
+      - core-postgres-password
+    deploy:
+      placement:
+        constraints:
+          - node.hostname == SRVxTN001
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+secrets:
+  core-postgres-password:
+    external: true
 
 networks:
   core-intranet-network:
     external: true
-----
-
-.Environment variables
-[source,yaml]
-----
-POSTGRES_PASSWORD: пароль пользователя postgres
 ----
 
 .Сниптет создания базы данных и пользователя
@@ -239,38 +252,56 @@ ALTER DATABASE service_db OWNER TO service_account;
 [source,yaml]
 ----
 services:
-  core-traefik:
-    image: "traefik:v3.4"
-    container_name: "core-traefik"
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+  proxy:
+    image: traefik:v3.6
     networks:
-      - intranet
+      - core-intranet-network
+    ports:
+      - target: 80
+        published: 80
+        mode: host
+        protocol: tcp
+      - target: 443
+        published: 443
+        mode: host
+        protocol: tcp
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     command:
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--providers.docker.network=core-intranet-network"
-      - "--entryPoints.web.address=:80"
-      - "--entryPoints.websecure.address=:443"
-      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.websecure.http.tls=true"
+      - "--providers.swarm.endpoint=unix:///var/run/docker.sock"
+      - "--providers.swarm.watch=true"
+      - "--providers.swarm.exposedbydefault=false"
+      - "--providers.swarm.network=core-intranet-network"
       - "--api.dashboard=true"
       - "--api.insecure=false"
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.dashboard.rule=Host(`traefik.intranet.zubkov.one`)"
-      - "traefik.http.routers.dashboard.service=api@internal"
-      - "traefik.http.routers.dashboard.entrypoints=websecure"
-      - "traefik.http.routers.dashboard.tls=true"
-      - "traefik.http.routers.dashboard.middlewares=auth-administrator"
-      - "traefik.http.middlewares.auth-administrator.basicauth.users=administrator:$$apr1$$lou79e2k$$o90jbOi7OWbKqlue/cguG/"
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock:ro"
-
+      - "--log.level=INFO"
+      - "--accesslog=true"
+      - "--metrics.prometheus=true"
+    
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.intranet.zubkov.one`)"
+        - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+        - "traefik.http.routers.traefik-dashboard.service=api@internal"
+        - "traefik.http.routers.traefik-dashboard.tls=true"
+        - "traefik.http.services.traefik-dashboard.loadbalancer.server.port=8080"
 
 networks:
   core-intranet-network:
